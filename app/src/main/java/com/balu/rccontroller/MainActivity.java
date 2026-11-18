@@ -226,49 +226,110 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void connectSelected() {
-        if (!hasConnectPermission()) {
-            checkPermissionAndLoad();
-            return;
-        }
-        if (devices.isEmpty() || deviceSpinner.getSelectedItemPosition() >= devices.size()) {
-            Toast.makeText(this, "Pair HC-05 in Android Bluetooth settings first", Toast.LENGTH_LONG).show();
-            return;
-        }
-        if (connecting) return;
-        disconnect();
-        BluetoothDevice device = devices.get(deviceSpinner.getSelectedItemPosition());
-        connecting = true;
-        setStatus("Connecting to " + device.getName() + "...", false);
 
-        new Thread(() -> {
-            BluetoothSocket newSocket = null;
-            try {
-                newSocket = device.createRfcommSocketToServiceRecord(SPP_UUID);
-                newSocket.connect();
-                OutputStream stream = newSocket.getOutputStream();
-                BluetoothSocket connectedSocket = newSocket;
-                runOnUiThread(() -> {
-                    socket = connectedSocket;
-                    output = stream;
-                    connecting = false;
-                    setStatus("CONNECTED to " + device.getName(), false);
-                    Toast.makeText(this, "HC-05 connected", Toast.LENGTH_SHORT).show();
-                });
-            } catch (Exception e) {
-                if (newSocket != null) {
-                    try { newSocket.close(); } catch (IOException ignored) {}
-                }
-                runOnUiThread(() -> {
-                    connecting = false;
-                    setStatus("Connection failed. Close Serial Bluetooth Terminal and retry.", true);
-                    Toast.makeText(this, "Could not connect. Ensure HC-05 is paired and no other app is connected.",
-                            Toast.LENGTH_LONG).show();
-                });
-            }
-        }).start();
+private void connectSelected() {
+
+    if (!hasConnectPermission()) {
+        checkPermissionAndLoad();
+        return;
     }
 
+    if (devices.isEmpty() ||
+        deviceSpinner.getSelectedItemPosition() >= devices.size()) {
+
+        Toast.makeText(this,
+            "Pair HC-05 in Bluetooth settings first",
+            Toast.LENGTH_LONG).show();
+        return;
+    }
+
+    if (connecting) return;
+
+    disconnect();
+
+    BluetoothDevice device =
+        devices.get(deviceSpinner.getSelectedItemPosition());
+
+    connecting = true;
+    setStatus("Connecting to HC-05...", false);
+
+    new Thread(() -> {
+
+        BluetoothSocket newSocket = null;
+        Exception firstError = null;
+
+        try {
+
+            bluetoothAdapter.cancelDiscovery();
+
+            // First try secure Bluetooth SPP
+            try {
+                newSocket =
+                    device.createRfcommSocketToServiceRecord(SPP_UUID);
+
+                newSocket.connect();
+
+            } catch (Exception e) {
+
+                firstError = e;
+
+                if (newSocket != null) {
+                    try {
+                        newSocket.close();
+                    } catch (Exception ignored) {}
+                }
+
+                // Fallback: insecure Bluetooth SPP
+                newSocket =
+                    device.createInsecureRfcommSocketToServiceRecord(
+                        SPP_UUID
+                    );
+
+                newSocket.connect();
+            }
+
+            BluetoothSocket connectedSocket = newSocket;
+            OutputStream stream =
+                connectedSocket.getOutputStream();
+
+            runOnUiThread(() -> {
+
+                socket = connectedSocket;
+                output = stream;
+                connecting = false;
+
+                setStatus("CONNECTED TO HC-05", false);
+
+                Toast.makeText(this,
+                    "Bluetooth connected successfully",
+                    Toast.LENGTH_LONG).show();
+            });
+
+        } catch (Exception e) {
+
+            if (newSocket != null) {
+                try {
+                    newSocket.close();
+                } catch (Exception ignored) {}
+            }
+
+            String error = e.getClass().getSimpleName()
+                    + ": " + e.getMessage();
+
+            runOnUiThread(() -> {
+
+                connecting = false;
+
+                setStatus("FAILED: " + error, true);
+
+                Toast.makeText(this,
+                    error,
+                    Toast.LENGTH_LONG).show();
+            });
+        }
+
+    }).start();
+}
     private void send(char command) {
         try {
             if (output != null && socket != null && socket.isConnected()) {
