@@ -1,22 +1,24 @@
+
 package com.balu.rccontroller;
 
 import android.Manifest;
 import android.app.Activity;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothSocket;
+import android.content.Context;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -26,354 +28,488 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final int REQUEST_CONNECT = 41;
+
+    private static final int REQUEST_BLUETOOTH_CONNECT = 100;
     private static final UUID SPP_UUID =
             UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
     private BluetoothAdapter bluetoothAdapter;
-    private BluetoothSocket socket;
-    private OutputStream output;
+    private BluetoothSocket bluetoothSocket;
+    private OutputStream outputStream;
+
+    private final ArrayList<BluetoothDevice> pairedDevices =
+            new ArrayList<>();
+    private final ArrayList<String> deviceNames =
+            new ArrayList<>();
+
+    private final ExecutorService bluetoothExecutor =
+            Executors.newSingleThreadExecutor();
+
     private Spinner deviceSpinner;
     private TextView statusText;
-    private ArrayList<BluetoothDevice> devices = new ArrayList<>();
-    private boolean connecting = false;
+    private Button connectButton;
+    private Button disconnectButton;
+    private Button refreshButton;
+
+    private volatile boolean connected = false;
+    private volatile boolean connecting = false;
 
     @Override
-    public void onCreate(Bundle state) {
-        super.onCreate(state);
-        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-        buildScreen();
-        checkPermissionAndLoad();
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        BluetoothManager manager =
+                (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+
+        if (manager != null) {
+            bluetoothAdapter = manager.getAdapter();
+        }
+
+        createInterface();
+        checkBluetoothPermission();
     }
 
-    private int dp(float value) {
-        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
-    }
+    private void createInterface() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(24, 24, 24, 24);
+        root.setGravity(Gravity.CENTER_HORIZONTAL);
 
-    private TextView label(String text, int size, int color) {
-        TextView v = new TextView(this);
-        v.setText(text);
-        v.setTextSize(size);
-        v.setTextColor(color);
-        v.setGravity(Gravity.CENTER);
-        return v;
-    }
+        TextView heading = new TextView(this);
+        heading.setText("BALU RC CONTROLLER");
+        heading.setTextSize(25);
+        heading.setTypeface(null, Typeface.BOLD);
+        heading.setGravity(Gravity.CENTER);
+        root.addView(heading, matchWidth(65));
 
-    private LinearLayout vertical() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.VERTICAL);
-        l.setPadding(dp(18), dp(14), dp(18), dp(18));
-        return l;
-    }
+        TextView subtitle = new TextView(this);
+        subtitle.setText("Bluetooth Classic - HC-05");
+        subtitle.setTextSize(16);
+        subtitle.setGravity(Gravity.CENTER);
+        root.addView(subtitle, matchWidth(45));
 
-    private void buildScreen() {
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout root = vertical();
-        root.setBackgroundColor(Color.rgb(242, 245, 249));
-
-        TextView title = label("BALU RC CONTROLLER", 24, Color.rgb(20, 39, 65));
-        title.setTypeface(null, Typeface.BOLD);
-        root.addView(title, new LinearLayout.LayoutParams(-1, dp(54)));
-
-        TextView subtitle = label("4-WHEEL BLUETOOTH ROBOT  •  FIXED SPEED 160", 12,
-                Color.rgb(75, 91, 110));
-        root.addView(subtitle, new LinearLayout.LayoutParams(-1, dp(32)));
+        TextView deviceLabel = new TextView(this);
+        deviceLabel.setText("Select paired Bluetooth device");
+        deviceLabel.setTextSize(16);
+        root.addView(deviceLabel, matchWidth(45));
 
         deviceSpinner = new Spinner(this);
-        root.addView(deviceSpinner, new LinearLayout.LayoutParams(-1, dp(52)));
+        root.addView(deviceSpinner, matchWidth(55));
 
         LinearLayout connectionRow = new LinearLayout(this);
         connectionRow.setOrientation(LinearLayout.HORIZONTAL);
-        Button refresh = makeButton("REFRESH", Color.rgb(75, 91, 110));
-        Button connect = makeButton("CONNECT", Color.rgb(27, 117, 190));
-        Button disconnect = makeButton("DISCONNECT", Color.rgb(190, 65, 65));
-        connectionRow.addView(refresh, new LinearLayout.LayoutParams(0, dp(52), 1));
-        connectionRow.addView(connect, new LinearLayout.LayoutParams(0, dp(52), 1));
-        connectionRow.addView(disconnect, new LinearLayout.LayoutParams(0, dp(52), 1));
-        root.addView(connectionRow);
 
-        statusText = label("DISCONNECTED — select your paired HC-05", 14,
-                Color.rgb(150, 55, 55));
-        root.addView(statusText, new LinearLayout.LayoutParams(-1, dp(52)));
+        refreshButton = new Button(this);
+        refreshButton.setText("REFRESH");
+        connectionRow.addView(refreshButton, weightedWidth());
 
-        TextView speed = label("MOTOR SPEED 160 / 255", 18, Color.rgb(20, 39, 65));
-        speed.setTypeface(null, Typeface.BOLD);
-        root.addView(speed, new LinearLayout.LayoutParams(-1, dp(48)));
+        connectButton = new Button(this);
+        connectButton.setText("CONNECT");
+        connectionRow.addView(connectButton, weightedWidth());
 
-        root.addView(label("Press and hold a direction. Release to STOP.", 13,
-                Color.rgb(75, 91, 110)), new LinearLayout.LayoutParams(-1, dp(35)));
+        disconnectButton = new Button(this);
+        disconnectButton.setText("DISCONNECT");
+        connectionRow.addView(disconnectButton, weightedWidth());
 
-        LinearLayout pad = new LinearLayout(this);
-        pad.setOrientation(LinearLayout.VERTICAL);
-        pad.setGravity(Gravity.CENTER);
+        root.addView(connectionRow, matchWidth(65));
 
-        LinearLayout row1 = new LinearLayout(this);
-        row1.setGravity(Gravity.CENTER);
-        row1.addView(new View(this), new LinearLayout.LayoutParams(dp(100), dp(82)));
-        row1.addView(directionButton("▲\nFORWARD", 'F'), new LinearLayout.LayoutParams(dp(112), dp(82)));
-        row1.addView(new View(this), new LinearLayout.LayoutParams(dp(100), dp(82)));
+        statusText = new TextView(this);
+        statusText.setText("Status: Checking Bluetooth...");
+        statusText.setTextSize(16);
+        statusText.setGravity(Gravity.CENTER);
+        statusText.setPadding(5, 15, 5, 15);
+        root.addView(statusText, matchWidth(65));
 
-        LinearLayout row2 = new LinearLayout(this);
-        row2.setGravity(Gravity.CENTER);
-        row2.addView(directionButton("◀\nLEFT", 'L'), new LinearLayout.LayoutParams(dp(100), dp(88)));
-        row2.addView(stopButton(), new LinearLayout.LayoutParams(dp(112), dp(88)));
-        row2.addView(directionButton("RIGHT\n▶", 'R'), new LinearLayout.LayoutParams(dp(100), dp(88)));
+        TextView controlTitle = new TextView(this);
+        controlTitle.setText("CAR CONTROL");
+        controlTitle.setTextSize(21);
+        controlTitle.setTypeface(null, Typeface.BOLD);
+        controlTitle.setGravity(Gravity.CENTER);
+        root.addView(controlTitle, matchWidth(55));
 
-        LinearLayout row3 = new LinearLayout(this);
-        row3.setGravity(Gravity.CENTER);
-        row3.addView(new View(this), new LinearLayout.LayoutParams(dp(100), dp(82)));
-        row3.addView(directionButton("▼\nBACKWARD", 'B'), new LinearLayout.LayoutParams(dp(112), dp(82)));
-        row3.addView(new View(this), new LinearLayout.LayoutParams(dp(100), dp(82)));
+        Button forwardButton = createDirectionButton("FORWARD", 'F');
+        Button leftButton = createDirectionButton("LEFT", 'L');
+        Button stopButton = new Button(this);
+        stopButton.setText("STOP");
+        Button rightButton = createDirectionButton("RIGHT", 'R');
+        Button backwardButton = createDirectionButton("BACKWARD", 'B');
 
-        pad.addView(row1);
-        pad.addView(row2);
-        pad.addView(row3);
-        root.addView(pad);
+        LinearLayout forwardRow = new LinearLayout(this);
+        forwardRow.setGravity(Gravity.CENTER);
+        forwardRow.addView(forwardButton, weightedWidth());
+        root.addView(forwardRow, matchWidth(75));
 
-        TextView note = label("HC-05 Bluetooth Classic SPP • 9600 baud • Commands F/B/L/R/S",
-                11, Color.rgb(85, 98, 115));
-        root.addView(note, new LinearLayout.LayoutParams(-1, dp(52)));
+        LinearLayout middleRow = new LinearLayout(this);
+        middleRow.setGravity(Gravity.CENTER);
+        middleRow.addView(leftButton, weightedWidth());
+        middleRow.addView(stopButton, weightedWidth());
+        middleRow.addView(rightButton, weightedWidth());
+        root.addView(middleRow, matchWidth(75));
 
-        refresh.setOnClickListener(v -> checkPermissionAndLoad());
-        connect.setOnClickListener(v -> connectSelected());
-        disconnect.setOnClickListener(v -> disconnect());
+        LinearLayout backwardRow = new LinearLayout(this);
+        backwardRow.setGravity(Gravity.CENTER);
+        backwardRow.addView(backwardButton, weightedWidth());
+        root.addView(backwardRow, matchWidth(75));
 
-        scroll.addView(root);
-        setContentView(scroll);
+        stopButton.setOnClickListener(v -> sendCommand('S'));
+
+        TextView instruction = new TextView(this);
+        instruction.setText(
+                "Hold a direction to move. Release to stop.\n" +
+                "Motor speed is fixed in the Arduino program."
+        );
+        instruction.setTextSize(14);
+        instruction.setGravity(Gravity.CENTER);
+        instruction.setPadding(5, 15, 5, 5);
+        root.addView(instruction, matchWidth(70));
+
+        refreshButton.setOnClickListener(v -> refreshPairedDevices());
+        connectButton.setOnClickListener(v -> connectSelected());
+        disconnectButton.setOnClickListener(v -> disconnectBluetooth());
+
+        setContentView(root);
     }
 
-    private Button makeButton(String text, int color) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setTextSize(11);
-        b.setTextColor(Color.WHITE);
-        b.setAllCaps(false);
-        b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color));
-        return b;
+    private LinearLayout.LayoutParams matchWidth(int height) {
+        return new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, height);
     }
 
-    private Button directionButton(String text, char command) {
-        Button b = makeButton(text, Color.rgb(35, 112, 190));
-        b.setTextSize(16);
-        b.setTypeface(null, Typeface.BOLD);
-        b.setOnTouchListener((view, event) -> {
+    private LinearLayout.LayoutParams weightedWidth() {
+        return new LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                1
+        );
+    }
+
+    private Button createDirectionButton(String label, char command) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setTextSize(15);
+
+        button.setOnTouchListener((view, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                send(command);
+                sendCommand(command);
                 return true;
             }
+
             if (event.getAction() == MotionEvent.ACTION_UP ||
                     event.getAction() == MotionEvent.ACTION_CANCEL) {
-                send('S');
+                sendCommand('S');
                 return true;
             }
+
             return true;
         });
-        return b;
-    }
 
-    private Button stopButton() {
-        Button b = makeButton("■\nSTOP", Color.rgb(195, 54, 54));
-        b.setTextSize(17);
-        b.setTypeface(null, Typeface.BOLD);
-        b.setOnClickListener(v -> send('S'));
-        return b;
+        return button;
     }
 
     private boolean hasConnectPermission() {
-        return Build.VERSION.SDK_INT < 31 ||
-                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                        == PackageManager.PERMISSION_GRANTED;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                    == PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
     }
 
-    private void checkPermissionAndLoad() {
-        if (Build.VERSION.SDK_INT >= 31 && !hasConnectPermission()) {
-            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},
-                    REQUEST_CONNECT);
+    private void checkBluetoothPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                !hasConnectPermission()) {
+
+            requestPermissions(
+                    new String[]{Manifest.permission.BLUETOOTH_CONNECT},
+                    REQUEST_BLUETOOTH_CONNECT
+            );
         } else {
-            loadPairedDevices();
+            initializeBluetooth();
         }
     }
 
-    private void loadPairedDevices() {
-        if (bluetoothAdapter == null) {
-            setStatus("This phone does not support Bluetooth", true);
-            return;
-        }
-        if (!bluetoothAdapter.isEnabled()) {
-            setStatus("Turn ON Bluetooth in Android settings", true);
-            return;
-        }
-        try {
-            devices.clear();
-            ArrayList<String> names = new ArrayList<>();
-            Set<BluetoothDevice> bonded = bluetoothAdapter.getBondedDevices();
-            for (BluetoothDevice d : bonded) {
-                devices.add(d);
-                String name = d.getName();
-                names.add((name == null ? "Bluetooth device" : name) + "  •  " + d.getAddress());
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults) {
+
+        super.onRequestPermissionsResult(
+                requestCode, permissions, grantResults);
+
+        if (requestCode == REQUEST_BLUETOOTH_CONNECT) {
+            if (grantResults.length > 0 &&
+                    grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                initializeBluetooth();
+            } else {
+                showStatus("Bluetooth permission denied");
+                Toast.makeText(this,
+                        "Allow Nearby devices permission",
+                        Toast.LENGTH_LONG).show();
             }
-            if (names.isEmpty()) names.add("No paired devices — pair HC-05 in Android Settings first");
-            ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
-                    android.R.layout.simple_spinner_item, names);
-            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-            deviceSpinner.setAdapter(adapter);
-            setStatus(devices.isEmpty() ? "No paired devices found" : "Select your paired HC-05",
-                    devices.isEmpty());
-        } catch (SecurityException e) {
-            setStatus("Bluetooth permission not granted", true);
         }
     }
 
-
-private void connectSelected() {
-
-    if (!hasConnectPermission()) {
-        checkPermissionAndLoad();
-        return;
-    }
-
-    if (devices.isEmpty() ||
-        deviceSpinner.getSelectedItemPosition() >= devices.size()) {
-
-        Toast.makeText(this,
-            "Pair HC-05 in Bluetooth settings first",
-            Toast.LENGTH_LONG).show();
-        return;
-    }
-
-    if (connecting) return;
-
-    disconnect();
-
-    BluetoothDevice device =
-        devices.get(deviceSpinner.getSelectedItemPosition());
-
-    connecting = true;
-    setStatus("Connecting to HC-05...", false);
-
-    new Thread(() -> {
-
-        BluetoothSocket newSocket = null;
-        Exception firstError = null;
+    private void initializeBluetooth() {
+        if (bluetoothAdapter == null) {
+            showStatus("Bluetooth is not supported on this phone");
+            return;
+        }
 
         try {
+            if (!bluetoothAdapter.isEnabled()) {
+                showStatus("Please turn ON Bluetooth");
+                return;
+            }
 
-            bluetoothAdapter.cancelDiscovery();
+            refreshPairedDevices();
 
-            // First try secure Bluetooth SPP
+        } catch (SecurityException e) {
+            showStatus("Bluetooth permission error: " + e.getMessage());
+        }
+    }
+
+    private void refreshPairedDevices() {
+        if (!hasConnectPermission()) {
+            checkBluetoothPermission();
+            return;
+        }
+
+        if (bluetoothAdapter == null) {
+            showStatus("Bluetooth adapter not available");
+            return;
+        }
+
+        try {
+            Set<BluetoothDevice> bonded =
+                    bluetoothAdapter.getBondedDevices();
+
+            pairedDevices.clear();
+            deviceNames.clear();
+
+            if (bonded != null) {
+                for (BluetoothDevice device : bonded) {
+                    pairedDevices.add(device);
+
+                    String name = device.getName();
+                    if (name == null || name.trim().isEmpty()) {
+                        name = "Unknown device";
+                    }
+
+                    deviceNames.add(name + " - " + device.getAddress());
+                }
+            }
+
+            ArrayAdapter<String> adapter = new ArrayAdapter<>(
+                    this,
+                    android.R.layout.simple_spinner_item,
+                    deviceNames
+            );
+
+            adapter.setDropDownViewResource(
+                    android.R.layout.simple_spinner_dropdown_item);
+
+            deviceSpinner.setAdapter(adapter);
+
+            if (pairedDevices.isEmpty()) {
+                showStatus("No paired devices. Pair HC-05 in phone settings.");
+            } else {
+                showStatus("Found " + pairedDevices.size() +
+                        " paired device(s). Select your HC-05.");
+            }
+
+        } catch (SecurityException e) {
+            showStatus("Permission error: " + e.getMessage());
+        }
+    }
+
+    private void connectSelected() {
+        if (!hasConnectPermission()) {
+            checkBluetoothPermission();
+            return;
+        }
+
+        if (bluetoothAdapter == null) {
+            showStatus("Bluetooth adapter unavailable");
+            return;
+        }
+
+        if (connected) {
+            showStatus("Already connected");
+            return;
+        }
+
+        if (connecting) {
+            showStatus("Connection attempt already running");
+            return;
+        }
+
+        int selectedPosition = deviceSpinner.getSelectedItemPosition();
+
+        if (selectedPosition < 0 ||
+                selectedPosition >= pairedDevices.size()) {
+            showStatus("Select a paired HC-05 device first");
+            return;
+        }
+
+        BluetoothDevice device = pairedDevices.get(selectedPosition);
+
+        connecting = true;
+        showStatus("Connecting to " + device.getName() + "...");
+
+        bluetoothExecutor.execute(() -> {
+            BluetoothSocket newSocket = null;
+            Exception secureError = null;
+
             try {
-                newSocket =
-                    device.createRfcommSocketToServiceRecord(SPP_UUID);
+                // First try the standard secure Bluetooth SPP connection.
+                try {
+                    newSocket =
+                            device.createRfcommSocketToServiceRecord(SPP_UUID);
+                    newSocket.connect();
 
-                newSocket.connect();
+                } catch (Exception e) {
+                    secureError = e;
+
+                    if (newSocket != null) {
+                        try {
+                            newSocket.close();
+                        } catch (IOException ignored) {
+                        }
+                    }
+
+                    // Fallback for HC-05 modules that require insecure SPP.
+                    newSocket =
+                            device.createInsecureRfcommSocketToServiceRecord(
+                                    SPP_UUID);
+                    newSocket.connect();
+                }
+
+                OutputStream stream = newSocket.getOutputStream();
+
+                bluetoothSocket = newSocket;
+                outputStream = stream;
+                connected = true;
+                connecting = false;
+
+                runOnUiThread(() -> {
+                    showStatus("CONNECTED to " + device.getName());
+                    Toast.makeText(this,
+                            "HC-05 Connected",
+                            Toast.LENGTH_SHORT).show();
+                });
 
             } catch (Exception e) {
-
-                firstError = e;
+                connecting = false;
+                connected = false;
 
                 if (newSocket != null) {
                     try {
                         newSocket.close();
-                    } catch (Exception ignored) {}
+                    } catch (IOException ignored) {
+                    }
                 }
 
-                // Fallback: insecure Bluetooth SPP
-                newSocket =
-                    device.createInsecureRfcommSocketToServiceRecord(
-                        SPP_UUID
-                    );
+                final String error =
+                        e.getClass().getSimpleName() + ": " +
+                        String.valueOf(e.getMessage());
 
-                newSocket.connect();
+                runOnUiThread(() -> {
+                    showStatus("FAILED: " + error);
+                    Toast.makeText(this,
+                            "Connection failed: " + error,
+                            Toast.LENGTH_LONG).show();
+                });
             }
-
-            BluetoothSocket connectedSocket = newSocket;
-            OutputStream stream =
-                connectedSocket.getOutputStream();
-
-            runOnUiThread(() -> {
-
-                socket = connectedSocket;
-                output = stream;
-                connecting = false;
-
-                setStatus("CONNECTED TO HC-05", false);
-
-                Toast.makeText(this,
-                    "Bluetooth connected successfully",
-                    Toast.LENGTH_LONG).show();
-            });
-
-        } catch (Exception e) {
-
-            if (newSocket != null) {
-                try {
-                    newSocket.close();
-                } catch (Exception ignored) {}
-            }
-
-            String error = e.getClass().getSimpleName()
-                    + ": " + e.getMessage();
-
-            runOnUiThread(() -> {
-
-                connecting = false;
-
-                setStatus("FAILED: " + error, true);
-
-                Toast.makeText(this,
-                    error,
-                    Toast.LENGTH_LONG).show();
-            });
-        }
-
-    }).start();
-}
-    private void send(char command) {
-        try {
-            if (output != null && socket != null && socket.isConnected()) {
-                output.write((byte) command);
-                output.flush();
-            } else {
-                Toast.makeText(this, "Connect to HC-05 first", Toast.LENGTH_SHORT).show();
-            }
-        } catch (IOException e) {
-            setStatus("Bluetooth send failed — reconnect", true);
-            disconnect();
-        }
+        });
     }
 
-    private void disconnect() {
-        try { if (output != null) output.close(); } catch (Exception ignored) {}
-        try { if (socket != null) socket.close(); } catch (Exception ignored) {}
-        output = null;
-        socket = null;
+    private void sendCommand(char command) {
+        if (!connected || outputStream == null) {
+            if (command == 'S') {
+                return;
+            }
+            showStatus("Not connected. Connect to HC-05 first.");
+            return;
+        }
+
+        bluetoothExecutor.execute(() -> {
+            try {
+                OutputStream stream = outputStream;
+
+                if (stream != null && connected) {
+                    stream.write((byte) command);
+                    stream.flush();
+                }
+
+            } catch (IOException e) {
+                connected = false;
+                runOnUiThread(() ->
+                        showStatus("Send failed: " + e.getMessage()));
+            }
+        });
+    }
+
+    private void disconnectBluetooth() {
+        connected = false;
         connecting = false;
-        if (statusText != null) setStatus("DISCONNECTED", true);
+
+        bluetoothExecutor.execute(() -> {
+            try {
+                if (outputStream != null) {
+                    outputStream.close();
+                }
+            } catch (IOException ignored) {
+            }
+
+            try {
+                if (bluetoothSocket != null) {
+                    bluetoothSocket.close();
+                }
+            } catch (IOException ignored) {
+            }
+
+            outputStream = null;
+            bluetoothSocket = null;
+
+            runOnUiThread(() -> {
+                showStatus("Disconnected");
+                Toast.makeText(this,
+                        "Bluetooth Disconnected",
+                        Toast.LENGTH_SHORT).show();
+            });
+        });
     }
 
-    private void setStatus(String message, boolean error) {
+    private void showStatus(String message) {
         if (statusText != null) {
-            statusText.setText(message);
-            statusText.setTextColor(error ? Color.rgb(175, 45, 45) : Color.rgb(20, 130, 75));
-        }
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
-        super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == REQUEST_CONNECT) {
-            if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED)
-                loadPairedDevices();
-            else
-                setStatus("Nearby devices permission is required", true);
+            statusText.setText("Status: " + message);
         }
     }
 
     @Override
     protected void onDestroy() {
-        disconnect();
+        connected = false;
+        connecting = false;
+
+        try {
+            if (outputStream != null) {
+                outputStream.close();
+            }
+        } catch (IOException ignored) {
+        }
+
+        try {
+            if (bluetoothSocket != null) {
+                bluetoothSocket.close();
+            }
+        } catch (IOException ignored) {
+        }
+
+        bluetoothExecutor.shutdownNow();
         super.onDestroy();
     }
 }
